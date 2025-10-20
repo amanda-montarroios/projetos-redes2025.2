@@ -4,11 +4,11 @@ import hashlib
 import argparse
 
 class Server:
-    def __init__(self, host='127.0.0.1', port=5005, protocol='gbn', max_chars=30):
+    def __init__(self, host='127.0.0.1', port=5005, protocol='gbn', min_chars=30):
         self.host = host
         self.port = port
         self.protocol = protocol
-        self.max_chars = max_chars
+        self.min_chars = min(min_chars, 30)
         self.client_sessions = {}
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -16,13 +16,13 @@ class Server:
     def handle_syn(self, client_socket, client_addr, data):
         print(f"[SERVIDOR] SYN recebido de {client_addr}: {data}")
         client_protocol = data.get('protocol', self.protocol)
-        requested_max = max(data.get('max_chars', self.max_chars), 30)
+        requested_min = min(data.get('min_chars', self.min_chars), 30)
 
         session_id = hashlib.md5(f"{client_addr}".encode()).hexdigest()[:8]
 
         self.client_sessions[client_addr] = {
             'protocol': client_protocol,
-            'max_chars': requested_max,
+            'min_chars': requested_min,
             'session_id': session_id,
             'handshake_complete': False
         }
@@ -30,7 +30,7 @@ class Server:
         syn_ack = {
             'status': 'ok',
             'protocol': client_protocol,
-            'max_chars': requested_max,
+            'min_chars': requested_min,
             'session_id': session_id
         }
 
@@ -65,7 +65,18 @@ class Server:
                 ack_data = json.loads(data.decode('utf-8'))
                 self.handle_ack(client_addr, ack_data)
 
+                while True:
+                    msg = client_socket.recv(1024)
+                    if not msg:
+                        break
+                    mensagem = msg.decode('utf-8')
+                    print(f"[SERVIDOR] Mensagem recebida de {client_addr}: {mensagem}")
+
+                    resposta = f"Recebido: {mensagem}"
+                    client_socket.sendall(resposta.encode('utf-8'))
+
                 client_socket.close()
+
             except KeyboardInterrupt:
                 print("\n[SERVIDOR] Servidor finalizado pelo usuário")
                 break

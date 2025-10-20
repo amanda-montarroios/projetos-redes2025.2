@@ -4,11 +4,11 @@ import argparse
 
 class Client:
  
-    def __init__(self, server_addr='127.0.0.1', server_port=5005, protocol='gbn', max_chars=30):
+    def __init__(self, server_addr='127.0.0.1', server_port=5005, protocol='gbn', min_chars=30):
         self.server_addr = server_addr
         self.server_port = server_port
         self.protocol = protocol
-        self.max_chars = max_chars
+        self.min_chars = min(min_chars, 30)
         self.session_id = None
 
     def connect(self):
@@ -17,7 +17,7 @@ class Client:
         print(f"[CLIENTE] Conectado ao servidor {self.server_addr}:{self.server_port}")
 
        
-        syn = {'protocol': self.protocol, 'max_chars': self.max_chars}
+        syn = {'protocol': self.protocol, 'min_chars': self.min_chars}
         sock.sendall(json.dumps(syn).encode('utf-8'))
         print(f"[CLIENTE] SYN enviado: {syn}")
 
@@ -31,7 +31,16 @@ class Client:
         sock.sendall(json.dumps(ack).encode('utf-8'))
         print(f"[CLIENTE] ACK enviado. Handshake concluído. Session={self.session_id}")
 
+        while True:
+            mensagem = input("Digite uma mensagem para o servidor (ou 'sair' para encerrar): ")
+            if mensagem.lower() == 'sair':
+                break
+            sock.sendall(mensagem.encode('utf-8'))
+            resposta = sock.recv(1024)
+            print(f"[CLIENTE] Resposta do servidor: {resposta.decode('utf-8')}")
+
         sock.close()
+
 
 
 if __name__ == "__main__":

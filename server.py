@@ -4,6 +4,7 @@ import json
 import hashlib
 import time
 import argparse
+import threading
 
 def calcular_checksum(texto):
     return sum(texto.encode('utf-8')) % 256
@@ -56,7 +57,6 @@ class Server:
         checksum_recebido = message_data.get('checksum')
         checksum_calculado = calcular_checksum(data)
 
-        # Verifica integridade
         if checksum_recebido != checksum_calculado:
             nack = {'type':'ack','status':'erro','sequence':sequence,
                     'message':'Erro de integridade detectado','timestamp':time.time()}
@@ -65,7 +65,6 @@ class Server:
             print(f"[SERVIDOR] Pacote #{sequence} corrompido!")
             return
 
-        # Verifica tamanho da mensagem
         if len(data) > self.max_payload:
             nack = {'type':'ack','status':'erro','sequence':sequence,
                     'message':'Carga útil excede o máximo permitido','timestamp':time.time()}
@@ -86,7 +85,6 @@ class Server:
             'message': 'Pacote recebido com sucesso',
             'timestamp': time.time()
         }
-        
         client_socket.sendall(json.dumps(ack).encode('utf-8'))
         session['acks_sent'] += 1
 
@@ -100,7 +98,7 @@ class Server:
             session['buffer'].clear()
 
     def handle_close(self, client_addr, message_data):
-        print(f"[SERVIDOR] Cliente {client_addr} solicitou encerramento")
+        print(f"[SERVIDOR] Cliente {client_addr} solicitou encerramento ")
         if client_addr in self.client_sessions:
             session = self.client_sessions[client_addr]
             duration = time.time() - session['start_time']
@@ -111,7 +109,42 @@ class Server:
             print(f" Pacotes recebidos: {session.get('packets_received')}")
             print(f" ACKs enviados: {session.get('acks_sent')}")
             print(f"{'='*60}\n")
-            del self.client_sessions[client_addr]
+    
+    def client_thread(self, client_socket, addr):
+        client_addr = f"{addr[0]}:{addr[1]}"
+        try:
+           
+            data = client_socket.recv(1024)
+            syn_data = json.loads(data.decode('utf-8'))
+            self.handle_syn(client_socket, client_addr, syn_data)
+
+            data = client_socket.recv(1024)
+            ack_data = json.loads(data.decode('utf-8'))
+            self.handle_ack(client_addr, ack_data)
+
+            print(f"[SERVIDOR] Aguardando pacotes de {client_addr}...\n")
+
+            while True:
+                msg = client_socket.recv(2048)
+                if not msg:
+                    # Cliente parou de enviar dados, mas conexão permanece aberta
+                    continue
+                message_data = json.loads(msg.decode('utf-8'))
+                msg_type = message_data.get('type')
+                if msg_type == 'data':
+                    self.handle_data_message(client_socket, client_addr, message_data)
+                elif msg_type == 'close':
+                    self.handle_close(client_addr, message_data)
+                    print(f"[SERVIDOR] Close recebido de {client_addr} — sessão mantida.")
+                    continue
+                else:
+                    print(f"[SERVIDOR] Tipo de mensagem desconhecido: {msg_type}")
+
+        except Exception as e:
+            print(f"[SERVIDOR] Erro na thread do cliente {client_addr}: {e}")
+        finally:
+            client_socket.close()
+            print(f"[SERVIDOR] Conexão com {client_addr} encerrada\n")
 
     def start(self):
         print(f"\n{'='*60}")
@@ -129,39 +162,9 @@ class Server:
         while True:
             try:
                 client_socket, addr = self.sock.accept()
-                client_addr = f"{addr[0]}:{addr[1]}"
-                print(f"[SERVIDOR] Nova conexão de {client_addr}")
-
-                data = client_socket.recv(1024)
-                syn_data = json.loads(data.decode('utf-8'))
-                self.handle_syn(client_socket, client_addr, syn_data)
-
-                data = client_socket.recv(1024)
-                ack_data = json.loads(data.decode('utf-8'))
-                self.handle_ack(client_addr, ack_data)
-
-                print(f"[SERVIDOR] Aguardando pacotes de {client_addr}...\n")
-
-                while True:
-                    msg = client_socket.recv(2048)
-                    if not msg:
-                        print(f"[SERVIDOR] Conexão fechada por {client_addr}")
-                        if client_addr in self.client_sessions:
-                            del self.client_sessions[client_addr]
-                        break
-                    message_data = json.loads(msg.decode('utf-8'))
-                    msg_type = message_data.get('type')
-                    if msg_type == 'data':
-                        self.handle_data_message(client_socket, client_addr, message_data)
-                    elif msg_type == 'close':
-                        self.handle_close(client_addr, message_data)
-                        break
-                    else:
-                        print(f"[SERVIDOR] Tipo de mensagem desconhecido: {msg_type}")
-
-                client_socket.close()
-                print(f"[SERVIDOR] Conexão com {client_addr} encerrada\n")
-
+                thread = threading.Thread(target=self.client_thread, args=(client_socket, addr))
+                thread.start()
+                print(f"[SERVIDOR] Cliente {addr} atendido em uma nova thread.")
             except KeyboardInterrupt:
                 print("\n[SERVIDOR] Servidor finalizado pelo usuário")
                 break

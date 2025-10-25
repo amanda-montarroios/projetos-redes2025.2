@@ -57,27 +57,29 @@ class Server:
         checksum_recebido = message_data.get('checksum')
         checksum_calculado = calcular_checksum(data)
 
+        print(f"[SERVIDOR] Pacote #{sequence} recebido de {client_addr}")
+        print(f"Conteúdo: '{data}' | Tamanho: {len(data)} | Timestamp: {message_data.get('timestamp')}")
+        print(f"Checksum enviado: {checksum_recebido} | Checksum calculado: {checksum_calculado}")
+
         if checksum_recebido != checksum_calculado:
             nack = {'type':'ack','status':'erro','sequence':sequence,
                     'message':'Erro de integridade detectado','timestamp':time.time()}
             client_socket.sendall(json.dumps(nack).encode('utf-8'))
             session['acks_sent'] += 1
-            print(f"[SERVIDOR] Pacote #{sequence} corrompido!")
-            return
+            print(f"[SERVIDOR] Pacote #{sequence} corrompido! → Retornando False\n")
+            return False
+
 
         if len(data) > self.max_payload:
             nack = {'type':'ack','status':'erro','sequence':sequence,
                     'message':'Carga útil excede o máximo permitido','timestamp':time.time()}
             client_socket.sendall(json.dumps(nack).encode('utf-8'))
             session['acks_sent'] += 1
-            print(f"[SERVIDOR] Pacote #{sequence} inválido! Tamanho {len(data)} > máximo {self.max_payload}.")
-            return
+            print(f"[SERVIDOR] Pacote #{sequence} inválido! Tamanho {len(data)} > máximo {self.max_payload} → Retornando False\n")
+            return False
 
-        print(f"[SERVIDOR] Pacote #{sequence} recebido de {client_addr}")
-        print(f"Conteúdo: '{data}' | Tamanho: {len(data)} | Timestamp: {message_data.get('timestamp')}")
         session['buffer'][sequence] = data
         session['packets_received'] += 1
-
         ack = {
             'type': 'ack',
             'status': 'ok',
@@ -87,6 +89,7 @@ class Server:
         }
         client_socket.sendall(json.dumps(ack).encode('utf-8'))
         session['acks_sent'] += 1
+        print(f"[SERVIDOR] Pacote #{sequence} íntegro → Retornando True\n")
 
         if message_data.get('is_last', False):
             full_message = ''.join(session['buffer'][i] for i in sorted(session['buffer']))
@@ -96,6 +99,9 @@ class Server:
             print(f"Total de pacotes: {len(session['buffer'])}")
             print(f"{'='*80}\n")
             session['buffer'].clear()
+
+        return True
+
 
     def handle_close(self, client_addr, message_data):
         print(f"[SERVIDOR] Cliente {client_addr} solicitou encerramento ")

@@ -25,6 +25,7 @@ class Client:
 
     def send_packet(self, sock, payload, seq_num, total_packets, is_last):
         """Envia um pacote de dados segmentado para o servidor"""
+        checksum = calcular_checksum(payload)
         message_packet = {
             'type': 'data',
             'session_id': self.session_id,
@@ -34,14 +35,14 @@ class Client:
             'data': payload,
             'protocol': self.protocol,
             'timestamp': time.time(),
-            'checksum': calcular_checksum(payload)
+            'checksum': checksum
         }
         sock.sendall(json.dumps(message_packet).encode('utf-8'))
         self.packets_sent += 1
-        print(f"[CLIENTE] Pacote #{seq_num} enviado: '{payload}'")
+        print(f"[CLIENTE] Pacote #{seq_num} enviado: '{payload}' | Checksum: {checksum}")
 
     def receive_ack(self, sock):
-        """Recebe confirmação do servidor para um pacote"""
+        """Recebe confirmação do servidor para um pacote e valida o checksum"""
         try:
             sock.settimeout(5.0)
             data = sock.recv(2048)
@@ -50,19 +51,23 @@ class Client:
             if ack.get('type') == 'ack':
                 seq = ack.get('sequence')
                 status = ack.get('status')
-                if status == 'ok':
+                valid = (status == 'ok')  # True se checksum OK, False se corrompido
+
+                if valid:
                     self.packets_confirmed += 1
-                    print(f"[CLIENTE] ACK recebido para pacote #{seq}")
+                    print(f"[CLIENTE] ACK recebido para pacote #{seq} | Checksum OK? {valid}")
                 else:
-                    print(f"[CLIENTE] NACK recebido para pacote #{seq}: {ack.get('message', 'Erro desconhecido')}")
-                return ack
+                    print(f"[CLIENTE] NACK recebido para pacote #{seq}: {ack.get('message', 'Erro desconhecido')} | Checksum OK? {valid}")
+
+                return valid
         except socket.timeout:
             print("[CLIENTE] Timeout! Servidor não respondeu ao ACK.")
-            return None
+            return False
         except Exception as e:
             print(f"[CLIENTE] Erro ao receber ACK: {e}")
-            return None
-        return None
+            return False
+
+        return False
 
     def connect(self):
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -126,8 +131,8 @@ class Client:
                 is_last_packet = (i == total_packets - 1)
 
                 self.send_packet(sock, chunk, seq_num_to_send, total_packets, is_last_packet)
-                ack = self.receive_ack(sock)
-                if ack and ack.get('status') == 'ok' and ack.get('sequence') == seq_num_to_send:
+                ack_valido = self.receive_ack(sock)
+                if ack_valido:
                     pacotes_enviados_nesta_msg += 1
                 else:
                     print(f"[CLIENTE] Erro na sequência de ACK. Abortando mensagem.")

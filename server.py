@@ -23,6 +23,7 @@ class Server:
 
     def handle_syn(self, client_socket, client_addr, data):
         print(f"[SERVIDOR] SYN recebido de {client_addr}")
+        protocol_requested = data.get('protocol', self.protocol) # Pega protocolo do cliente
         session_id = hashlib.md5(f"{client_addr}{time.time()}".encode()).hexdigest()[:8]
         self.client_sessions[client_addr] = {
             'session_id': session_id,
@@ -31,17 +32,19 @@ class Server:
             'packets_received': 0,
             'acks_sent': 0,
             'start_time': time.time(),
+            'protocol': protocol_requested,  # Armazena o protocolo escolhido
+            'corrupted': False              # Flag para rastrear corrupção na mensagem (para GBN)
         }
         syn_ack = {
             'status': 'ok',
-            'protocol': self.protocol,
+            'protocol': protocol_requested,
             'max_chars': self.max_chars,
             'max_payload': self.max_payload,
             'window_size': self.window_size,
             'session_id': session_id
         }
         client_socket.sendall(json.dumps(syn_ack).encode('utf-8'))
-        print(f"[SERVIDOR] SYN-ACK enviado para {client_addr} (Session: {session_id})")
+        print(f"[SERVIDOR] SYN-ACK enviado para {client_addr} (Session: {session_id}, Protocolo: {protocol_requested})")
         return session_id
 
     def handle_ack(self, client_addr, data):
@@ -52,53 +55,100 @@ class Server:
 
     def handle_data_message(self, client_socket, client_addr, message_data):
         session = self.client_sessions.get(client_addr)
+        if not session:
+            print(f"[SERVIDOR] Sessão não encontrada para {client_addr}")
+            return False
+
+        protocol = session.get('protocol', 'gbn')
         sequence = message_data.get('sequence', 0)
         data = message_data.get('data', '')
         checksum_recebido = message_data.get('checksum')
         checksum_calculado = calcular_checksum(data)
+        is_last_packet = message_data.get('is_last', False)
 
-        print(f"[SERVIDOR] Pacote #{sequence} recebido de {client_addr}")
-        print(f"Conteúdo: '{data}' | Tamanho: {len(data)} | Timestamp: {message_data.get('timestamp')}")
+        print(f"[SERVIDOR] Pacote #{sequence} ({protocol}) recebido de {client_addr}")
+        print(f"Conteúdo: '{data}' | Tamanho: {len(data)}")
         print(f"Checksum enviado: {checksum_recebido} | Checksum calculado: {checksum_calculado}")
 
+        # 1. Validação de Integridade (Checksum)
         if checksum_recebido != checksum_calculado:
-            nack = {'type':'ack','status':'erro','sequence':sequence,
-                    'message':'Erro de integridade detectado','timestamp':time.time()}
-            client_socket.sendall(json.dumps(nack).encode('utf-8'))
-            session['acks_sent'] += 1
-            print(f"[SERVIDOR] Pacote #{sequence} corrompido! → Retornando False\n")
-            return False
+            if protocol == 'sr': # SR: NACK imediato
+                nack = {'type':'ack','status':'error','sequence':sequence,
+                        'message':'Erro de integridade detectado (SR)','timestamp':time.time()}
+                client_socket.sendall(json.dumps(nack).encode('utf-8'))
+                session['acks_sent'] += 1
+                print(f"[SERVIDOR] Pacote #{sequence} corrompido! → NACK (SR) enviado.\n")
+                return False
+            elif protocol == 'gbn': # GBN: Marca como corrompido, aguarda final da mensagem
+                session['corrupted'] = True 
+                print(f"[SERVIDOR] Pacote #{sequence} corrompido! (GBN) - Não enviando NACK imediato.\n")
 
-
+        # 2. Validação de Tamanho de Carga Útil
         if len(data) > self.max_payload:
-            nack = {'type':'ack','status':'erro','sequence':sequence,
-                    'message':'Carga útil excede o máximo permitido','timestamp':time.time()}
-            client_socket.sendall(json.dumps(nack).encode('utf-8'))
-            session['acks_sent'] += 1
-            print(f"[SERVIDOR] Pacote #{sequence} inválido! Tamanho {len(data)} > máximo {self.max_payload} → Retornando False\n")
-            return False
+            if protocol == 'sr': # SR: NACK imediato
+                nack = {'type':'ack','status':'error','sequence':sequence,
+                        'message':'Carga útil excede o máximo permitido (SR)','timestamp':time.time()}
+                client_socket.sendall(json.dumps(nack).encode('utf-8'))
+                session['acks_sent'] += 1
+                print(f"[SERVIDOR] Pacote #{sequence} inválido! Tamanho {len(data)} > máximo {self.max_payload} → NACK (SR) enviado.\n")
+                return False
+            elif protocol == 'gbn': # GBN: Marca como corrompido
+                session['corrupted'] = True
+                print(f"[SERVIDOR] Pacote #{sequence} inválido! (GBN) - Não enviando NACK imediato.\n")
 
+        # 3. Processamento de Pacote Válido
         session['buffer'][sequence] = data
         session['packets_received'] += 1
-        ack = {
-            'type': 'ack',
-            'status': 'ok',
-            'sequence': sequence, 
-            'message': 'Pacote recebido com sucesso',
-            'timestamp': time.time()
-        }
-        client_socket.sendall(json.dumps(ack).encode('utf-8'))
-        session['acks_sent'] += 1
-        print(f"[SERVIDOR] Pacote #{sequence} íntegro → Retornando True\n")
+        
+        # SR: ACK por Pacote. GBN: Sem ACK
+        if protocol == 'sr' and not session.get('corrupted', False):
+            ack = {
+                'type': 'ack',
+                'status': 'ok',
+                'sequence': sequence, 
+                'message': 'Pacote recebido com sucesso (SR)',
+                'timestamp': time.time()
+            }
+            client_socket.sendall(json.dumps(ack).encode('utf-8'))
+            session['acks_sent'] += 1
+            print(f"[SERVIDOR] Pacote #{sequence} íntegro (SR) → ACK enviado.\n")
+        elif protocol == 'gbn' and not session.get('corrupted', False):
+            # No ACK for intermediate packets in GBN
+            print(f"[SERVIDOR] Pacote #{sequence} íntegro (GBN) → NENHUM ACK enviado (aguardando final da mensagem).\n")
 
-        if message_data.get('is_last', False):
+        # 4. Final da Mensagem
+        if is_last_packet:
             full_message = ''.join(session['buffer'][i] for i in sorted(session['buffer']))
+            is_message_corrupted = session.pop('corrupted', False) # Pega e remove a flag de corrupção
+            
             print(f"\n{'='*30} MENSAGEM COMPLETA RECEBIDA {'='*30}")
             print(f"Cliente: {client_addr}")
             print(f"Mensagem: {full_message}")
             print(f"Total de pacotes: {len(session['buffer'])}")
-            print(f"{'='*80}\n")
+
+            if protocol == 'gbn':
+                # GBN: Envia ACK/NACK final
+                if is_message_corrupted:
+                    final_ack = {'type':'ack','status':'error','sequence':sequence,
+                                 'message':'Mensagem rejeitada (GBN): Um ou mais pacotes estavam corrompidos/inválidos.',
+                                 'echo': full_message, 'timestamp':time.time()}
+                    print(f"[SERVIDOR] Mensagem completa rejeitada (GBN). NACK final enviado.")
+                else:
+                    final_ack = {'type':'ack','status':'ok','sequence':sequence, 
+                                 'message':'Mensagem recebida com sucesso (GBN)','echo': full_message, 
+                                 'timestamp':time.time()}
+                    print(f"[SERVIDOR] Mensagem completa aceita (GBN). ACK final enviado.")
+                
+                client_socket.sendall(json.dumps(final_ack).encode('utf-8'))
+                session['acks_sent'] += 1
+            
+            elif protocol == 'sr':
+                # SR: A confirmação de todos os pacotes já foi feita individualmente.
+                # Apenas exibimos a mensagem completa.
+                print(f"[SERVIDOR] Mensagem completa re-montada (SR). Confirmações já enviadas por pacote.")
+
             session['buffer'].clear()
+            print(f"{'='*80}\n")
 
         return True
 
@@ -111,10 +161,12 @@ class Server:
             print(f"\n{'='*60}")
             print(f"ESTATÍSTICAS DA SESSÃO {session.get('session_id')}:")
             print(f" Cliente: {client_addr}")
+            print(f" Protocolo: {session.get('protocol')}")
             print(f" Duração: {duration:.2f}s")
             print(f" Pacotes recebidos: {session.get('packets_received')}")
             print(f" ACKs enviados: {session.get('acks_sent')}")
             print(f"{'='*60}\n")
+            del self.client_sessions[client_addr]
     
     def client_thread(self, client_socket, addr):
         client_addr = f"{addr[0]}:{addr[1]}"
@@ -133,7 +185,6 @@ class Server:
             while True:
                 msg = client_socket.recv(2048)
                 if not msg:
-                    # Cliente parou de enviar dados, mas conexão permanece aberta
                     continue
                 message_data = json.loads(msg.decode('utf-8'))
                 msg_type = message_data.get('type')
@@ -141,8 +192,8 @@ class Server:
                     self.handle_data_message(client_socket, client_addr, message_data)
                 elif msg_type == 'close':
                     self.handle_close(client_addr, message_data)
-                    print(f"[SERVIDOR] Close recebido de {client_addr} — sessão mantida.")
-                    continue
+                    print(f"[SERVIDOR] Close recebido de {client_addr} — conexão encerrada.")
+                    break
                 else:
                     print(f"[SERVIDOR] Tipo de mensagem desconhecido: {msg_type}")
 

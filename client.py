@@ -39,10 +39,10 @@ class Client:
         }
         sock.sendall(json.dumps(message_packet).encode('utf-8'))
         self.packets_sent += 1
-        print(f"[CLIENTE] Pacote #{seq_num} enviado: '{payload}' | Checksum: {checksum}")
+        print(f"[CLIENTE] Pacote #{seq_num} ({self.protocol}) enviado: '{payload}' | Checksum: {checksum}")
 
     def receive_ack(self, sock):
-        """Recebe confirmação do servidor para um pacote e valida o checksum"""
+        """Recebe confirmação do servidor para um pacote (SR) ou mensagem completa (GBN)"""
         try:
             sock.settimeout(5.0)
             data = sock.recv(2048)
@@ -51,13 +51,13 @@ class Client:
             if ack.get('type') == 'ack':
                 seq = ack.get('sequence')
                 status = ack.get('status')
-                valid = (status == 'ok')  # True se checksum OK, False se corrompido
+                valid = (status == 'ok') # True se status for 'ok'
 
                 if valid:
                     self.packets_confirmed += 1
-                    print(f"[CLIENTE] ACK recebido para pacote #{seq} | Checksum OK? {valid}")
+                    print(f"[CLIENTE] ACK recebido para pacote/mensagem #{seq} | Status OK? {valid}")
                 else:
-                    print(f"[CLIENTE] NACK recebido para pacote #{seq}: {ack.get('message', 'Erro desconhecido')} | Checksum OK? {valid}")
+                    print(f"[CLIENTE] NACK recebido para pacote/mensagem #{seq}: {ack.get('message', 'Erro desconhecido')} | Status OK? {valid}")
 
                 return valid
         except socket.timeout:
@@ -87,8 +87,14 @@ class Client:
         self.session_id = syn_ack.get('session_id')
         self.max_chars = syn_ack.get('max_chars', self.max_chars)
         self.window_size = syn_ack.get('window_size', self.window_size)
+        
+        server_protocol = syn_ack.get('protocol', self.protocol)
+        if server_protocol != self.protocol:
+            print(f"[CLIENTE] Aviso: Protocolo negociado mudou para {server_protocol}.")
+            self.protocol = server_protocol
 
         print(f"[CLIENTE] Session ID: {self.session_id}")
+        print(f"[CLIENTE] Protocolo: {self.protocol}")
         print(f"[CLIENTE] Máximo de caracteres por mensagem: {self.max_chars}")
         print(f"[CLIENTE] Tamanho da janela: {self.window_size}")
 
@@ -98,7 +104,8 @@ class Client:
         print(f"{'='*60}\nPronto para enviar mensagens!\n{'='*60}")
 
         while True:
-            print(f"\n[INFO] Mensagens enviadas: {self.messages_sent} | Pacotes confirmados: {self.packets_confirmed}")
+            # A estatística de 'Confirmações (ACKs)' agora reflete o número de ACKs recebidos (pacotes em SR, ou mensagens em GBN)
+            print(f"\n[INFO] Mensagens enviadas: {self.messages_sent} | Confirmações (ACKs): {self.packets_confirmed}")
             mensagem = input(f"Digite uma mensagem (máx. {self.max_chars} chars) ou 'sair': ")
 
             if mensagem.lower() == 'sair':
@@ -115,42 +122,63 @@ class Client:
                 print(f"[CLIENTE] Erro: mensagem vazia.")
                 continue
 
-            # Trunca mensagem acima de 30 caracteres
+            # Trunca mensagem acima do limite
             if len(mensagem) > self.max_chars:
                 print(f"[CLIENTE] Aviso: mensagem cortada para {self.max_chars} caracteres.")
                 mensagem = mensagem[:self.max_chars]
 
-            # Segmenta a mensagem em pacotes de 4 caracteres
+            # Segmenta a mensagem em pacotes
             chunks = [mensagem[i:i+self.PACKET_PAYLOAD_SIZE] for i in range(0, len(mensagem), self.PACKET_PAYLOAD_SIZE)]
             total_packets = len(chunks)
             print(f"[CLIENTE] Mensagem dividida em {total_packets} pacotes de {self.PACKET_PAYLOAD_SIZE} chars.")
+            
+            # Lógica GBN (Go-Back-N): Envia TUDO, espera 1 ACK final
+            if self.protocol == 'gbn':
+                for i, chunk in enumerate(chunks):
+                    seq_num_to_send = self.sequence_number_base + i
+                    is_last_packet = (i == total_packets - 1)
+                    self.send_packet(sock, chunk, seq_num_to_send, total_packets, is_last_packet)
 
-            pacotes_enviados_nesta_msg = 0
-            for i, chunk in enumerate(chunks):
-                seq_num_to_send = self.sequence_number_base + i
-                is_last_packet = (i == total_packets - 1)
-
-                self.send_packet(sock, chunk, seq_num_to_send, total_packets, is_last_packet)
-                ack_valido = self.receive_ack(sock)
+                # Espera a confirmação final da mensagem
+                ack_valido = self.receive_ack(sock) 
+                
                 if ack_valido:
-                    pacotes_enviados_nesta_msg += 1
+                    print(f"[CLIENTE] Mensagem completa confirmada com sucesso (GBN)!")
+                    self.messages_sent += 1
                 else:
-                    print(f"[CLIENTE] Erro na sequência de ACK. Abortando mensagem.")
-                    break
+                    print(f"[CLIENTE] Erro no ACK final (GBN). Mensagem rejeitada pelo servidor.")
+                
+            # Lógica SR (Selective Repeat): Envia 1, espera 1 ACK, repete
+            elif self.protocol == 'sr':
+                pacotes_confirmados_nesta_msg = 0
+                for i, chunk in enumerate(chunks):
+                    seq_num_to_send = self.sequence_number_base + i
+                    is_last_packet = (i == total_packets - 1)
 
-            if pacotes_enviados_nesta_msg == total_packets:
-                print(f"[CLIENTE] Mensagem completa enviada com sucesso!")
-                self.messages_sent += 1
+                    self.send_packet(sock, chunk, seq_num_to_send, total_packets, is_last_packet)
+                    ack_valido = self.receive_ack(sock)
+                    
+                    if ack_valido:
+                        pacotes_confirmados_nesta_msg += 1
+                    else:
+                        print(f"[CLIENTE] Erro na sequência de ACK. Abortando mensagem (SR).")
+                        break
 
+                if pacotes_confirmados_nesta_msg == total_packets:
+                    print(f"[CLIENTE] Mensagem completa enviada e confirmada com sucesso (SR)!")
+                    self.messages_sent += 1
+                
             self.sequence_number_base += total_packets
 
         # Estatísticas finais
+        taxa_sucesso = (self.packets_confirmed/self.packets_sent*100) if self.packets_sent > 0 else 0
+        
         print(f"\n{'='*60}")
         print("ESTATÍSTICAS DA SESSÃO:")
-        print(f"Total de mensagens completas enviadas: {self.messages_sent}")
-        print(f"Total de pacotes individuais enviados: {self.packets_sent}")
-        print(f"Total de pacotes individuais confirmados: {self.packets_confirmed}")
-        print(f"Taxa de sucesso (pacotes): {(self.packets_confirmed/self.packets_sent*100) if self.packets_sent > 0 else 0:.1f}%")
+        print(f"  • Total de mensagens completas enviadas: {self.messages_sent}")
+        print(f"  • Total de pacotes individuais enviados: {self.packets_sent}")
+        print(f"  • Total de confirmações (ACKs) recebidas: {self.packets_confirmed} (Pacotes para SR, Mensagens para GBN)")
+        print(f"  • Taxa de sucesso (ACKs/Pacotes): {taxa_sucesso:.1f}%")
         print(f"{'='*60}\n")
 
         sock.close()

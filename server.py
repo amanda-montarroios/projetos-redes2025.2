@@ -43,7 +43,7 @@ class Server:
             'window_size': self.window_size,
             'session_id': session_id
         }
-        client_socket.sendall(json.dumps(syn_ack).encode('utf-8'))
+        client_socket.sendall((json.dumps(syn_ack) + "\n").encode('utf-8'))
         print(f"[SERVIDOR] SYN-ACK enviado para {client_addr} (Session: {session_id}, Protocolo: {protocol_requested})")
         return session_id
 
@@ -58,7 +58,7 @@ class Server:
         if not session:
             print(f"[SERVIDOR] Sessão não encontrada para {client_addr}")
             return False
-
+        
         protocol = session.get('protocol', 'gbn')
         sequence = message_data.get('sequence', 0)
         data = message_data.get('data', '')
@@ -75,7 +75,7 @@ class Server:
             if protocol == 'sr': # SR: NACK imediato
                 nack = {'type':'ack','status':'error','sequence':sequence,
                         'message':'Erro de integridade detectado (SR)','timestamp':time.time()}
-                client_socket.sendall(json.dumps(nack).encode('utf-8'))
+                client_socket.sendall((json.dumps(nack) + "\n").encode('utf-8'))
                 session['acks_sent'] += 1
                 print(f"[SERVIDOR] Pacote #{sequence} corrompido! → NACK (SR) enviado.\n")
                 return False
@@ -88,7 +88,7 @@ class Server:
             if protocol == 'sr': # SR: NACK imediato
                 nack = {'type':'ack','status':'error','sequence':sequence,
                         'message':'Carga útil excede o máximo permitido (SR)','timestamp':time.time()}
-                client_socket.sendall(json.dumps(nack).encode('utf-8'))
+                client_socket.sendall((json.dumps(nack) + "\n").encode('utf-8'))
                 session['acks_sent'] += 1
                 print(f"[SERVIDOR] Pacote #{sequence} inválido! Tamanho {len(data)} > máximo {self.max_payload} → NACK (SR) enviado.\n")
                 return False
@@ -109,7 +109,7 @@ class Server:
                 'message': 'Pacote recebido com sucesso (SR)',
                 'timestamp': time.time()
             }
-            client_socket.sendall(json.dumps(ack).encode('utf-8'))
+            client_socket.sendall((json.dumps(ack) + "\n").encode('utf-8'))
             session['acks_sent'] += 1
             print(f"[SERVIDOR] Pacote #{sequence} íntegro (SR) → ACK enviado.\n")
         elif protocol == 'gbn' and not session.get('corrupted', False):
@@ -139,7 +139,7 @@ class Server:
                                  'timestamp':time.time()}
                     print(f"[SERVIDOR] Mensagem completa aceita (GBN). ACK final enviado.")
                 
-                client_socket.sendall(json.dumps(final_ack).encode('utf-8'))
+                client_socket.sendall((json.dumps(final_ack) + "\n").encode('utf-8'))
                 session['acks_sent'] += 1
             
             elif protocol == 'sr':
@@ -170,32 +170,46 @@ class Server:
     
     def client_thread(self, client_socket, addr):
         client_addr = f"{addr[0]}:{addr[1]}"
+        buffer = ''
         try:
-           
-            data = client_socket.recv(1024)
-            syn_data = json.loads(data.decode('utf-8'))
-            self.handle_syn(client_socket, client_addr, syn_data)
-
-            data = client_socket.recv(1024)
-            ack_data = json.loads(data.decode('utf-8'))
-            self.handle_ack(client_addr, ack_data)
-
             print(f"[SERVIDOR] Aguardando pacotes de {client_addr}...\n")
-
             while True:
-                msg = client_socket.recv(2048)
-                if not msg:
-                    continue
-                message_data = json.loads(msg.decode('utf-8'))
-                msg_type = message_data.get('type')
-                if msg_type == 'data':
-                    self.handle_data_message(client_socket, client_addr, message_data)
-                elif msg_type == 'close':
-                    self.handle_close(client_addr, message_data)
-                    print(f"[SERVIDOR] Close recebido de {client_addr} — conexão encerrada.")
+                data = client_socket.recv(2048)
+                if not data:
+                    # conexão fechada pelo cliente
                     break
-                else:
-                    print(f"[SERVIDOR] Tipo de mensagem desconhecido: {msg_type}")
+                buffer += data.decode('utf-8')
+
+                # processar mensagens separadas por newline
+                while '\n' in buffer:
+                    line, buffer = buffer.split('\n', 1)
+                    if not line.strip():
+                        continue
+                    try:
+                        message_data = json.loads(line)
+                    except json.JSONDecodeError as e:
+                        print(f"[SERVIDOR] Erro ao decodificar JSON de {client_addr}: {e}")
+                        continue
+
+                    # Handshake SYN (cliente envia 'protocol' sem 'type')
+                    if 'protocol' in message_data and 'type' not in message_data:
+                        self.handle_syn(client_socket, client_addr, message_data)
+                        continue
+
+                    # Handshake ACK (cliente confirma handshake)
+                    if 'session_id' in message_data and 'type' not in message_data:
+                        self.handle_ack(client_addr, message_data)
+                        continue
+
+                    msg_type = message_data.get('type')
+                    if msg_type == 'data':
+                        self.handle_data_message(client_socket, client_addr, message_data)
+                    elif msg_type == 'close':
+                        self.handle_close(client_addr, message_data)
+                        print(f"[SERVIDOR] Close recebido de {client_addr} — conexão encerrada.")
+                        break
+                    else:
+                        print(f"[SERVIDOR] Tipo de mensagem desconhecido: {msg_type}")
 
         except Exception as e:
             print(f"[SERVIDOR] Erro na thread do cliente {client_addr}: {e}")

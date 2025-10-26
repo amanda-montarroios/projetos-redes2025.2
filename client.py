@@ -37,7 +37,8 @@ class Client:
             'timestamp': time.time(),
             'checksum': checksum
         }
-        sock.sendall(json.dumps(message_packet).encode('utf-8'))
+        # Use newline framing so the server can split JSON messages reliably
+        sock.sendall((json.dumps(message_packet) + "\n").encode('utf-8'))
         self.packets_sent += 1
         print(f"[CLIENTE] Pacote #{seq_num} ({self.protocol}) enviado: '{payload}' | Checksum: {checksum}")
 
@@ -47,7 +48,28 @@ class Client:
             sock.settimeout(5.0)
             data = sock.recv(2048)
             sock.settimeout(None)
-            ack = json.loads(data.decode('utf-8'))
+            if not data:
+                print("[CLIENTE] Socket fechado pelo servidor ao aguardar ACK.")
+                return False
+
+            # Support newline-framed JSON: take the first line that contains JSON
+            try:
+                text = data.decode('utf-8')
+            except Exception as e:
+                print(f"[CLIENTE] Erro ao decodificar bytes do ACK: {e}")
+                return False
+
+            # Some recv() calls may include multiple JSON objects; split and parse the first non-empty line
+            lines = [l for l in text.split('\n') if l.strip()]
+            if not lines:
+                print("[CLIENTE] ACK recebido vazio ou inválido.")
+                return False
+
+            try:
+                ack = json.loads(lines[0])
+            except json.JSONDecodeError as e:
+                print(f"[CLIENTE] Erro ao decodificar JSON do ACK: {e}")
+                return False
             if ack.get('type') == 'ack':
                 seq = ack.get('sequence')
                 status = ack.get('status')
@@ -78,7 +100,7 @@ class Client:
 
         # Handshake
         syn = {'protocol': self.protocol, 'max_chars': self.max_chars}
-        sock.sendall(json.dumps(syn).encode('utf-8'))
+        sock.sendall((json.dumps(syn) + "\n").encode('utf-8'))
         print(f"[CLIENTE] SYN enviado: protocolo={self.protocol}, max_chars={self.max_chars}")
 
         data = sock.recv(1024)
@@ -99,7 +121,7 @@ class Client:
         print(f"[CLIENTE] Tamanho da janela: {self.window_size}")
 
         ack = {'session_id': self.session_id, 'message': 'Handshake completo'}
-        sock.sendall(json.dumps(ack).encode('utf-8'))
+        sock.sendall((json.dumps(ack) + "\n").encode('utf-8'))
         print(f"[CLIENTE] ACK enviado. Handshake concluído!\n")
         print(f"{'='*60}\nPronto para enviar mensagens!\n{'='*60}")
 
@@ -115,7 +137,7 @@ class Client:
                     'session_id': self.session_id,
                     'message': 'Cliente desconectando'
                 }
-                sock.sendall(json.dumps(close_packet).encode('utf-8'))
+                sock.sendall((json.dumps(close_packet) + "\n").encode('utf-8'))
                 break
 
             if len(mensagem) == 0:

@@ -9,19 +9,20 @@ def calcular_checksum(texto):
     return sum(texto.encode('utf-8')) % 256
 
 class Client:
-    PACKET_PAYLOAD_SIZE = 4  # Cada pacote envia no máximo 4 caracteres
+    PACKET_PAYLOAD_SIZE = 4  # Cada pacote envia no maximo 4 caracteres
 
     def __init__(self, server_addr='127.0.0.1', server_port=5005, protocol='gbn', max_chars=30):
         self.server_addr = server_addr
         self.server_port = server_port
         self.protocol = protocol
-        self.max_chars = min(max_chars, 30)  # máximo de 30 caracteres
+        self.max_chars = min(max_chars, 30)  # máaimo de 30 caracteres
         self.session_id = None
         self.sequence_number_base = 0
         self.messages_sent = 0
         self.packets_sent = 0
         self.packets_confirmed = 0
-        self.window_size = 5
+        self.window_size = 5 # TAMANHO MAXIMO  do servidor)
+        # self.cwnd (janela atual) inicializado dentro de connect()
 
     def send_packet(self, sock, payload, seq_num, total_packets, is_last):
         """Envia um pacote de dados segmentado para o servidor"""
@@ -124,9 +125,12 @@ class Client:
         sock.sendall((json.dumps(ack) + "\n").encode('utf-8'))
         print(f"[CLIENTE] ACK enviado. Handshake concluído!\n")
         print(f"{'='*60}\nPronto para enviar mensagens!\n{'='*60}")
+        
+        # !!Inicializa a janela atual (cwnd) AQUI !!
+        self.cwnd = 1        # JANELA ATUAL (Slow Start), como na imagem
 
         while True:
-            # A estatística de 'Confirmações (ACKs)' agora reflete o número de ACKs recebidos (pacotes em SR, ou mensagens em GBN)
+            # estatistica de 'Confirmacoes (ACKs)' agora reflete o numero de ACKs recebidos (pacotes em SR, ou mensagens em GBN)
             print(f"\n[INFO] Mensagens enviadas: {self.messages_sent} | Confirmações (ACKs): {self.packets_confirmed}")
             mensagem = input(f"Digite uma mensagem (máx. {self.max_chars} chars) ou 'sair': ")
 
@@ -154,14 +158,14 @@ class Client:
             total_packets = len(chunks)
             print(f"[CLIENTE] Mensagem dividida em {total_packets} pacotes de {self.PACKET_PAYLOAD_SIZE} chars.")
             
-            # Lógica GBN (Go-Back-N): Envia TUDO, espera 1 ACK final
+            # logica GBN (Go-Back-N): Envia TUDO, espera 1 ACK final
             if self.protocol == 'gbn':
                 for i, chunk in enumerate(chunks):
                     seq_num_to_send = self.sequence_number_base + i
                     is_last_packet = (i == total_packets - 1)
                     self.send_packet(sock, chunk, seq_num_to_send, total_packets, is_last_packet)
 
-                # Espera a confirmação final da mensagem
+                # Espera a confirmacao final da mensagem
                 ack_valido = self.receive_ack(sock) 
                 
                 if ack_valido:
@@ -169,26 +173,68 @@ class Client:
                     self.messages_sent += 1
                 else:
                     print(f"[CLIENTE] Erro no ACK final (GBN). Mensagem rejeitada pelo servidor.")
-                
-            # Lógica SR (Selective Repeat): Envia 1, espera 1 ACK, repete
+
+            # Lógica SR (Selective Repeat): AGORA COM JANELA DESLIZANTE (SLOW START)
             elif self.protocol == 'sr':
+                base = 0 # O início da nossa janela (índice do chunk)
                 pacotes_confirmados_nesta_msg = 0
-                for i, chunk in enumerate(chunks):
-                    seq_num_to_send = self.sequence_number_base + i
-                    is_last_packet = (i == total_packets - 1)
+                
+                print(f"[CLIENTE] Iniciando envio SR para {total_packets} pacotes. CWND inicial: {self.cwnd}")
 
-                    self.send_packet(sock, chunk, seq_num_to_send, total_packets, is_last_packet)
-                    ack_valido = self.receive_ack(sock)
+                while base < total_packets:
+                    # 1. Determina quantos pacotes enviar
+                    # A janela efetiva é o MENOR entre a sua janela atual (cwnd) e o máximo do servidor (window_size)
+                    effective_window = min(self.cwnd, self.window_size)
                     
-                    if ack_valido:
-                        pacotes_confirmados_nesta_msg += 1
-                    else:
-                        print(f"[CLIENTE] Erro na sequência de ACK. Abortando mensagem (SR).")
-                        break
+                    # Calcula quantos pacotes podemos enviar nesta rajada (sem passar do fim da mensagem)
+                    packets_to_send = min(effective_window, total_packets - base)
+                    
+                    print(f"[CLIENTE] Enviando rajada de {packets_to_send} pacotes (Base: {base}, CWND: {self.cwnd}, Max: {self.window_size})")
 
+                    # 2. Envia a rajada de pacotes (pipelining)
+                    sent_seq_nums = [] # Guarda os números de sequência que enviamos
+                    for i in range(packets_to_send):
+                        chunk_index = base + i
+                        chunk = chunks[chunk_index]
+                        seq_num_to_send = self.sequence_number_base + chunk_index
+                        is_last_packet = (chunk_index == total_packets - 1)
+                        
+                        self.send_packet(sock, chunk, seq_num_to_send, total_packets, is_last_packet)
+                        sent_seq_nums.append(seq_num_to_send)
+
+                    # 3. Aguarda os ACKs para essa rajada
+                    # O seu servidor SR envia 1 ACK por pacote, então esperamos 'packets_to_send' ACKs
+                    all_acks_ok = True
+                    for i in range(packets_to_send):
+                        # O receive_ack() vai bloquear esperando o próximo ACK
+                        ack_valido = self.receive_ack(sock) 
+                        
+                        if not ack_valido:
+                            print(f"[CLIENTE] Erro (NACK ou Timeout) no pacote {sent_seq_nums[i]}.")
+                            all_acks_ok = False
+                            break # Sai do loop de espera de ACK
+
+                    # 4. Atualiza a janela (Avançar e Aumentar)
+                    if all_acks_ok:
+                        # Avança a base e AUMENTA a janela (slow start)
+                        base += packets_to_send # Avança a janela
+                        pacotes_confirmados_nesta_msg += packets_to_send
+                        
+                        # Aumenta a janela de congestão, até o limite do servidor de max 5
+                        self.cwnd = min(self.cwnd + 1, self.window_size) 
+                        print(f"[CLIENTE] Rajada confirmada. Avançando base para {base}. Aumentando CWND para {self.cwnd}")
+                    else:
+                        
+                        print(f"[CLIENTE] Falha na rajada. Resetando CWND para 1 (validação de confiabilidade).")
+                        self.cwnd = 1 # reseta a janela
+                        break # Sai do 'while base < total_packets' e aborta esta mensagem
+
+                # Fim do while loop
                 if pacotes_confirmados_nesta_msg == total_packets:
                     print(f"[CLIENTE] Mensagem completa enviada e confirmada com sucesso (SR)!")
                     self.messages_sent += 1
+                else:
+                    print(f"[CLIENTE] Mensagem abortada devido a erro (SR).")
                 
             self.sequence_number_base += total_packets
 
@@ -209,7 +255,7 @@ class Client:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Cliente de Transporte Confiável")
     parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=5005)
+    parser.add_argument("--port", type=int, default=5005) # parser.add_action
     parser.add_argument("--max_chars", type=int, default=30)
     args = parser.parse_args()
 

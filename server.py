@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 import socket
 import json
 import hashlib
@@ -14,8 +13,8 @@ class Server:
         self.host = host
         self.port = port
         self.protocol = protocol
-        self.max_chars = min(max_chars, 30)  # Máximo 30 caracteres
-        self.max_payload = max_payload       # Pacotes de até 4 caracteres
+        self.max_chars = min(max_chars, 30)  
+        self.max_payload = max_payload       
         self.window_size = 5
         self.client_sessions = {}
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -72,27 +71,27 @@ class Server:
 
         # 1. Validação de Integridade (Checksum)
         if checksum_recebido != checksum_calculado:
-            if protocol == 'sr': # SR: NACK imediato
+            if protocol == 'sr': 
                 nack = {'type':'ack','status':'error','sequence':sequence,
                         'message':'Erro de integridade detectado (SR)','timestamp':time.time()}
                 client_socket.sendall((json.dumps(nack) + "\n").encode('utf-8'))
                 session['acks_sent'] += 1
                 print(f"[SERVIDOR] Pacote #{sequence} corrompido! → NACK (SR) enviado.\n")
                 return False
-            elif protocol == 'gbn': # GBN: Marca como corrompido, aguarda final da mensagem
+            elif protocol == 'gbn':
                 session['corrupted'] = True 
                 print(f"[SERVIDOR] Pacote #{sequence} corrompido! (GBN) - Não enviando NACK imediato.\n")
 
         # 2. Validação de Tamanho de Carga Útil
         if len(data) > self.max_payload:
-            if protocol == 'sr': # SR: NACK imediato
+            if protocol == 'sr': 
                 nack = {'type':'ack','status':'error','sequence':sequence,
                         'message':'Carga útil excede o máximo permitido (SR)','timestamp':time.time()}
                 client_socket.sendall((json.dumps(nack) + "\n").encode('utf-8'))
                 session['acks_sent'] += 1
                 print(f"[SERVIDOR] Pacote #{sequence} inválido! Tamanho {len(data)} > máximo {self.max_payload} → NACK (SR) enviado.\n")
                 return False
-            elif protocol == 'gbn': # GBN: Marca como corrompido
+            elif protocol == 'gbn': 
                 session['corrupted'] = True
                 print(f"[SERVIDOR] Pacote #{sequence} inválido! (GBN) - Não enviando NACK imediato.\n")
 

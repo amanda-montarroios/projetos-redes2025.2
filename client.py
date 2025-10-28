@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 import socket
 import json
 import argparse
@@ -9,7 +8,7 @@ def calcular_checksum(texto):
     return sum(texto.encode('utf-8')) % 256
 
 class Client:
-    PACKET_PAYLOAD_SIZE = 4  # Cada pacote envia no maximo 4 caracteres
+    PACKET_PAYLOAD_SIZE = 4  
 
     def __init__(self, server_addr='127.0.0.1', server_port=5005, protocol='gbn', max_chars=30):
         self.server_addr = server_addr
@@ -22,7 +21,6 @@ class Client:
         self.packets_sent = 0
         self.packets_confirmed = 0
         self.window_size = 5 # TAMANHO MAXIMO  do servidor)
-        # self.cwnd (janela atual) inicializado dentro de connect()
 
     def send_packet(self, sock, payload, seq_num, total_packets, is_last):
         """Envia um pacote de dados segmentado para o servidor"""
@@ -38,7 +36,7 @@ class Client:
             'timestamp': time.time(),
             'checksum': checksum
         }
-        # Use newline framing so the server can split JSON messages reliably
+
         sock.sendall((json.dumps(message_packet) + "\n").encode('utf-8'))
         self.packets_sent += 1
         print(f"[CLIENTE] Pacote #{seq_num} ({self.protocol}) enviado: '{payload}' | Checksum: {checksum}")
@@ -53,14 +51,14 @@ class Client:
                 print("[CLIENTE] Socket fechado pelo servidor ao aguardar ACK.")
                 return False
 
-            # Support newline-framed JSON: take the first line that contains JSON
+
             try:
                 text = data.decode('utf-8')
             except Exception as e:
                 print(f"[CLIENTE] Erro ao decodificar bytes do ACK: {e}")
                 return False
 
-            # Some recv() calls may include multiple JSON objects; split and parse the first non-empty line
+
             lines = [l for l in text.split('\n') if l.strip()]
             if not lines:
                 print("[CLIENTE] ACK recebido vazio ou inválido.")
@@ -192,7 +190,7 @@ class Client:
                     print(f"[CLIENTE] Enviando rajada de {packets_to_send} pacotes (Base: {base}, CWND: {self.cwnd}, Max: {self.window_size})")
 
                     # 2. Envia a rajada de pacotes (pipelining)
-                    sent_seq_nums = [] # Guarda os números de sequência que enviamos
+                    sent_seq_nums = [] 
                     for i in range(packets_to_send):
                         chunk_index = base + i
                         chunk = chunks[chunk_index]
@@ -212,7 +210,7 @@ class Client:
                         if not ack_valido:
                             print(f"[CLIENTE] Erro (NACK ou Timeout) no pacote {sent_seq_nums[i]}.")
                             all_acks_ok = False
-                            break # Sai do loop de espera de ACK
+                            break 
 
                     # 4. Atualiza a janela (Avançar e Aumentar)
                     if all_acks_ok:
@@ -226,10 +224,10 @@ class Client:
                     else:
                         
                         print(f"[CLIENTE] Falha na rajada. Resetando CWND para 1 (validação de confiabilidade).")
-                        self.cwnd = 1 # reseta a janela
-                        break # Sai do 'while base < total_packets' e aborta esta mensagem
+                        self.cwnd = 1
+                        break 
 
-                # Fim do while loop
+
                 if pacotes_confirmados_nesta_msg == total_packets:
                     print(f"[CLIENTE] Mensagem completa enviada e confirmada com sucesso (SR)!")
                     self.messages_sent += 1
@@ -255,7 +253,7 @@ class Client:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Cliente de Transporte Confiável")
     parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=5005) # parser.add_action
+    parser.add_argument("--port", type=int, default=5005) 
     parser.add_argument("--max_chars", type=int, default=30)
     args = parser.parse_args()
 

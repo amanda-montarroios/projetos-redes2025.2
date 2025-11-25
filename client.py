@@ -21,10 +21,30 @@ class Client:
         self.packets_sent = 0
         self.packets_confirmed = 0
         self.window_size = 5 # TAMANHO MAXIMO  do servidor)
+        # os atributos para simular os erros 
+        self.error_injection_mode = False 
+        self.corrupt_packet_index = -1 
+        self.corrupt_message_seq = -1
 
     def send_packet(self, sock, payload, seq_num, total_packets, is_last):
         """Envia um pacote de dados segmentado para o servidor"""
         checksum = calcular_checksum(payload)
+        
+        # logica para o erro
+        packet_index = seq_num - self.sequence_number_base # posição do pacote na mensagem atual 
+
+        # condicao para corromper
+        should_corrupt = (
+            self.corrupt_message_seq == self.messages_sent and 
+            packet_index == self.corrupt_packet_index
+        )
+        
+        if should_corrupt:
+            original_checksum = checksum
+            checksum = (checksum + 1) % 256 
+            print(f"[CLIENTE] !!! INJEÇÃO DE ERRO !!! Pacote #{seq_num} ({packet_index} na mensagem) com Checksum alterado de {original_checksum} para {checksum}")
+
+
         message_packet = {
             'type': 'data',
             'session_id': self.session_id,
@@ -34,7 +54,7 @@ class Client:
             'data': payload,
             'protocol': self.protocol,
             'timestamp': time.time(),
-            'checksum': checksum
+            'checksum': checksum 
         }
 
         sock.sendall((json.dumps(message_packet) + "\n").encode('utf-8'))
@@ -97,7 +117,7 @@ class Client:
         print(f"[CLIENTE] Conectado ao servidor {self.server_addr}:{self.server_port}")
         print(f"{'='*60}\n")
 
-        # Handshake
+        # Handshake (Mantido do seu código original)
         syn = {'protocol': self.protocol, 'max_chars': self.max_chars}
         sock.sendall((json.dumps(syn) + "\n").encode('utf-8'))
         print(f"[CLIENTE] SYN enviado: protocolo={self.protocol}, max_chars={self.max_chars}")
@@ -124,12 +144,36 @@ class Client:
         print(f"[CLIENTE] ACK enviado. Handshake concluído!\n")
         print(f"{'='*60}\nPronto para enviar mensagens!\n{'='*60}")
         
-        # !!Inicializa a janela atual (cwnd) AQUI !!
-        self.cwnd = 1        # JANELA ATUAL (Slow Start), como na imagem
+        self.cwnd = 1 
 
         while True:
-            # estatistica de 'Confirmacoes (ACKs)' agora reflete o numero de ACKs recebidos (pacotes em SR, ou mensagens em GBN)
             print(f"\n[INFO] Mensagens enviadas: {self.messages_sent} | Confirmações (ACKs): {self.packets_confirmed}")
+            
+            # logica para as falhas ERRO
+            self.corrupt_packet_index = -1
+            self.packet_loss_mode = False
+            self.corrupt_message_seq = -1
+
+            error_prompt = input("Deseja injetar falha na PRÓXIMA mensagem? ('c' - corromper / 'p' - perder / 'n' - normal): ").lower().strip()
+            
+            if error_prompt == 'c' or error_prompt == 'p':
+                self.corrupt_message_seq = self.messages_sent 
+                self.packet_loss_mode = (error_prompt == 'p')
+                
+                while True:
+                    try:
+                        idx = int(input(f"Qual o ÍNDICE do pacote na mensagem a {'PERDER' if self.packet_loss_mode else 'CORROMPER'}? (0, 1, 2...): "))
+                        if idx >= 0:
+                            self.corrupt_packet_index = idx
+                            action = "Perda agendada" if self.packet_loss_mode else "Corrupção de Checksum agendada"
+                            print(f"{action} para o pacote {idx} da próxima mensagem.")
+                            break
+                        else:
+                            print("Índice deve ser >= 0.")
+                    except ValueError:
+                        print("Entrada inválida. Digite um número inteiro.")
+                        
+            
             mensagem = input(f"Digite uma mensagem (máx. {self.max_chars} chars) ou 'sair': ")
 
             if mensagem.lower() == 'sair':
@@ -156,14 +200,14 @@ class Client:
             total_packets = len(chunks)
             print(f"[CLIENTE] Mensagem dividida em {total_packets} pacotes de {self.PACKET_PAYLOAD_SIZE} chars.")
             
-            # logica GBN (Go-Back-N): Envia TUDO, espera 1 ACK final
+            # Lógica GBN (Go-Back-N): Envia TUDO, espera 1 ACK final
             if self.protocol == 'gbn':
                 for i, chunk in enumerate(chunks):
                     seq_num_to_send = self.sequence_number_base + i
                     is_last_packet = (i == total_packets - 1)
                     self.send_packet(sock, chunk, seq_num_to_send, total_packets, is_last_packet)
 
-                # Espera a confirmacao final da mensagem
+                # Espera a confirmacao final da mensagem (GBN)
                 ack_valido = self.receive_ack(sock) 
                 
                 if ack_valido:
@@ -172,19 +216,15 @@ class Client:
                 else:
                     print(f"[CLIENTE] Erro no ACK final (GBN). Mensagem rejeitada pelo servidor.")
 
-            # Lógica SR (Selective Repeat): AGORA COM JANELA DESLIZANTE (SLOW START)
             elif self.protocol == 'sr':
-                base = 0 # O início da nossa janela (índice do chunk)
+                base = 0 
                 pacotes_confirmados_nesta_msg = 0
                 
                 print(f"[CLIENTE] Iniciando envio SR para {total_packets} pacotes. CWND inicial: {self.cwnd}")
-
+                
                 while base < total_packets:
                     # 1. Determina quantos pacotes enviar
-                    # A janela efetiva é o MENOR entre a sua janela atual (cwnd) e o máximo do servidor (window_size)
                     effective_window = min(self.cwnd, self.window_size)
-                    
-                    # Calcula quantos pacotes podemos enviar nesta rajada (sem passar do fim da mensagem)
                     packets_to_send = min(effective_window, total_packets - base)
                     
                     print(f"[CLIENTE] Enviando rajada de {packets_to_send} pacotes (Base: {base}, CWND: {self.cwnd}, Max: {self.window_size})")
@@ -200,11 +240,9 @@ class Client:
                         self.send_packet(sock, chunk, seq_num_to_send, total_packets, is_last_packet)
                         sent_seq_nums.append(seq_num_to_send)
 
-                    # 3. Aguarda os ACKs para essa rajada
-                    # O seu servidor SR envia 1 ACK por pacote, então esperamos 'packets_to_send' ACKs
+                    # 3. Aguarda os ACKs para essa rajada (SR espera 1 ACK por pacote)
                     all_acks_ok = True
                     for i in range(packets_to_send):
-                        # O receive_ack() vai bloquear esperando o próximo ACK
                         ack_valido = self.receive_ack(sock) 
                         
                         if not ack_valido:
@@ -215,14 +253,14 @@ class Client:
                     # 4. Atualiza a janela (Avançar e Aumentar)
                     if all_acks_ok:
                         # Avança a base e AUMENTA a janela (slow start)
-                        base += packets_to_send # Avança a janela
+                        base += packets_to_send
                         pacotes_confirmados_nesta_msg += packets_to_send
                         
-                        # Aumenta a janela de congestão, até o limite do servidor de max 5
+                        # Aumenta a janela de congestão
                         self.cwnd = min(self.cwnd + 1, self.window_size) 
                         print(f"[CLIENTE] Rajada confirmada. Avançando base para {base}. Aumentando CWND para {self.cwnd}")
                     else:
-                        
+                        # Falha de ACK/Timeout: reset ou retransmissão
                         print(f"[CLIENTE] Falha na rajada. Resetando CWND para 1 (validação de confiabilidade).")
                         self.cwnd = 1
                         break 
@@ -236,15 +274,14 @@ class Client:
                 
             self.sequence_number_base += total_packets
 
-        # Estatísticas finais
         taxa_sucesso = (self.packets_confirmed/self.packets_sent*100) if self.packets_sent > 0 else 0
         
         print(f"\n{'='*60}")
         print("ESTATÍSTICAS DA SESSÃO:")
-        print(f"  • Total de mensagens completas enviadas: {self.messages_sent}")
-        print(f"  • Total de pacotes individuais enviados: {self.packets_sent}")
-        print(f"  • Total de confirmações (ACKs) recebidas: {self.packets_confirmed} (Pacotes para SR, Mensagens para GBN)")
-        print(f"  • Taxa de sucesso (ACKs/Pacotes): {taxa_sucesso:.1f}%")
+        print(f"  • Total de mensagens completas enviadas: {self.messages_sent}")
+        print(f"  • Total de pacotes individuais enviados: {self.packets_sent}")
+        print(f"  • Total de confirmações (ACKs) recebidas: {self.packets_confirmed} (Pacotes para SR, Mensagens para GBN)")
+        print(f"  • Taxa de sucesso (ACKs/Pacotes): {taxa_sucesso:.1f}%")
         print(f"{'='*60}\n")
 
         sock.close()

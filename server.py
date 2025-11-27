@@ -4,18 +4,20 @@ import hashlib
 import time
 import argparse
 import threading
+import ssl  # MODIFICAÇÃO SSL
 
 def calcular_checksum(texto):
     return sum(texto.encode('utf-8')) % 256
 
 class Server:
-    def __init__(self, host='127.0.0.1', port=5005, protocol='gbn', max_chars=30, max_payload=4):
+    def __init__(self, host='127.0.0.1', port=5005, protocol='gbn', max_chars=30, max_payload=4, use_ssl=True):  # MODIFICAÇÃO SSL
         self.host = host
         self.port = port
         self.protocol = protocol
         self.max_chars = min(max_chars, 30)  
         self.max_payload = max_payload       
         self.window_size = 5
+        self.use_ssl = use_ssl  # MODIFICAÇÃO SSL
         self.client_sessions = {}
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -217,11 +219,20 @@ class Server:
             print(f"[SERVIDOR] Conexão com {client_addr} encerrada\n")
 
     def start(self):
+        
         print(f"\n{'='*60}")
         print("[SERVIDOR] Servidor iniciado")
         print(f"{'='*60}")
         self.sock.bind((self.host, self.port))
         self.sock.listen(5)
+        
+        # ========== INÍCIO MODIFICAÇÃO SSL ==========
+        if self.use_ssl:
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            context.load_cert_chain('server.crt', 'server.key')
+            self.sock = context.wrap_socket(self.sock, server_side=True)
+        # ========== FIM MODIFICAÇÃO SSL ==========
+        
         print(f"[SERVIDOR] Escutando em {self.host}:{self.port}")
         print(f"[SERVIDOR] Protocolo padrão: {self.protocol}")
         print(f"[SERVIDOR] Limite máximo da mensagem: {self.max_chars} caracteres")
@@ -252,7 +263,11 @@ if __name__ == "__main__":
     parser.add_argument("--protocol", choices=['gbn','sr'], default='gbn')
     parser.add_argument("--max_chars", type=int, default=30)
     parser.add_argument("--max_payload", type=int, default=4)
+    parser.add_argument("--no-ssl", action='store_true')  # MODIFICAÇÃO SSL
     args = parser.parse_args()
 
-    server = Server(args.host, args.port, args.protocol, args.max_chars, args.max_payload)
+    # ========== INÍCIO MODIFICAÇÃO SSL ==========
+    use_ssl = not args.no_ssl
+    server = Server(args.host, args.port, args.protocol, args.max_chars, args.max_payload, use_ssl)
+    # ========== FIM MODIFICAÇÃO SSL ==========
     server.start()

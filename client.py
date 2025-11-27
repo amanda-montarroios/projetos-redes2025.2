@@ -2,6 +2,7 @@ import socket
 import json
 import argparse
 import time
+import ssl  # MODIFICAÇÃO SSL
 
 def calcular_checksum(texto):
     """Calcula um checksum simples somando os bytes do texto."""
@@ -10,7 +11,7 @@ def calcular_checksum(texto):
 class Client:
     PACKET_PAYLOAD_SIZE = 4  
 
-    def __init__(self, server_addr='127.0.0.1', server_port=5005, protocol='gbn', max_chars=30):
+    def __init__(self, server_addr='127.0.0.1', server_port=5005, protocol='gbn', max_chars=30, use_ssl=True):  # MODIFICAÇÃO SSL
         self.server_addr = server_addr
         self.server_port = server_port
         self.protocol = protocol
@@ -21,6 +22,7 @@ class Client:
         self.packets_sent = 0
         self.packets_confirmed = 0
         self.window_size = 5 # TAMANHO MAXIMO  do servidor)
+        self.use_ssl = use_ssl  # MODIFICAÇÃO SSL
         # os atributos para simular os erros 
         self.error_injection_mode = False 
         self.corrupt_packet_index = -1 
@@ -111,7 +113,18 @@ class Client:
         return False
 
     def connect(self):
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        # ========== INÍCIO MODIFICAÇÃO SSL ==========
+        raw_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        
+        if self.use_ssl:
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
+            sock = context.wrap_socket(raw_sock, server_hostname=self.server_addr)
+        else:
+            sock = raw_sock
+        # ========== FIM MODIFICAÇÃO SSL ==========
+        
         sock.connect((self.server_addr, self.server_port))
         print(f"\n{'='*60}")
         print(f"[CLIENTE] Conectado ao servidor {self.server_addr}:{self.server_port}")
@@ -278,10 +291,10 @@ class Client:
         
         print(f"\n{'='*60}")
         print("ESTATÍSTICAS DA SESSÃO:")
-        print(f"  • Total de mensagens completas enviadas: {self.messages_sent}")
-        print(f"  • Total de pacotes individuais enviados: {self.packets_sent}")
-        print(f"  • Total de confirmações (ACKs) recebidas: {self.packets_confirmed} (Pacotes para SR, Mensagens para GBN)")
-        print(f"  • Taxa de sucesso (ACKs/Pacotes): {taxa_sucesso:.1f}%")
+        print(f"  • Total de mensagens completas enviadas: {self.messages_sent}")
+        print(f"  • Total de pacotes individuais enviados: {self.packets_sent}")
+        print(f"  • Total de confirmações (ACKs) recebidas: {self.packets_confirmed} (Pacotes para SR, Mensagens para GBN)")
+        print(f"  • Taxa de sucesso (ACKs/Pacotes): {taxa_sucesso:.1f}%")
         print(f"{'='*60}\n")
 
         sock.close()
@@ -292,6 +305,7 @@ if __name__ == "__main__":
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=5005) 
     parser.add_argument("--max_chars", type=int, default=30)
+    parser.add_argument("--no-ssl", action='store_true')  # MODIFICAÇÃO SSL
     args = parser.parse_args()
 
     chosen_protocol = ""
@@ -302,5 +316,8 @@ if __name__ == "__main__":
         else:
             print("Opção inválida. Digite 'gbn' ou 'sr'.")
 
-    client = Client(args.host, args.port, chosen_protocol, args.max_chars)
+    # ========== INÍCIO MODIFICAÇÃO SSL ==========
+    use_ssl = not args.no_ssl
+    client = Client(args.host, args.port, chosen_protocol, args.max_chars, use_ssl)
+    # ========== FIM MODIFICAÇÃO SSL ==========
     client.connect()

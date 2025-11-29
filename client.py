@@ -26,7 +26,7 @@ class Client:
     # [REQUISITO: Temporizador] Timeout para pacotes SR (2 segundos)
     SR_TIMEOUT = 2.0  
 
-    def __init__(self, server_addr='127.0.0.1', server_port=5005, protocol='gbn', max_chars=30, use_ssl=True):
+    def __init__(self, server_addr='127.0.0.1', server_port=5005, protocol='gbn', max_chars=30, window_size=5, use_ssl=False):
         self.server_addr = server_addr
         self.server_port = server_port
         self.protocol = protocol
@@ -37,8 +37,8 @@ class Client:
         self.messages_sent = 0
         self.packets_sent = 0
         self.packets_confirmed = 0
-        # [REQUISITO: Janela] Tamanho da janela de envio (para GBN e SR).
-        self.window_size = 5
+        # [REQUISITO: Janela] Tamanho da janela de envio (para GBN e SR) - será negociado
+        self.window_size = window_size
         self.use_ssl = use_ssl
         # [REQUISITO: Simulação de erro/perda] Variáveis para injeção de falha.
         self.corrupt_packet_index = -1
@@ -73,12 +73,16 @@ class Client:
 
         if should_lose:
             print(f"[CLIENTE] !!! INJEÇÃO DE PERDA !!! Pacote #{seq_num} ({packet_index} na mensagem) NÃO ENVIADO.")
+            # Desabilitar injeção após primeira perda para evitar loop infinito
+            self.corrupt_message_seq = -2
             return True
 
         checksum_to_send = checksum
         if should_corrupt:
             checksum_to_send = hashlib.sha1(b'CORROMPIDO_Checksum_Invalido_' + str(seq_num).encode()).hexdigest()
             print(f"[CLIENTE] !!! INJEÇÃO DE ERRO !!! Pacote #{seq_num} ({packet_index} na mensagem) com Checksum alterado para {checksum_to_send}.")
+            # Desabilitar injeção após primeira corrupção
+            self.corrupt_message_seq = -2
         
         # [REQUISITO: Criptografia simétrica] Criptografia Simétrica (Fernet)
         payload_encriptado = self.fernet.encrypt(payload.encode('utf-8'))
@@ -151,16 +155,22 @@ class Client:
         
         sock.connect((self.server_addr, self.server_port))
         
-        # [REQUISITO: Handshake] SYN
-        syn = {'protocol': self.protocol, 'max_chars': self.max_chars}
+        # [REQUISITO: Handshake] SYN - Cliente NÃO propõe janela, servidor decide
+        syn = {
+            'protocol': self.protocol, 
+            'max_chars': self.max_chars
+            # window_size REMOVIDO - servidor decide sozinho
+        }
         sock.sendall((json.dumps(syn) + "\n").encode('utf-8'))
+        print(f"[CLIENTE] SYN enviado: protocolo={self.protocol}, max_chars={self.max_chars}")
+        
         data = sock.recv(1024)
         syn_ack = json.loads(data.decode('utf-8'))
         
         # [REQUISITO: Handshake] SYN-ACK Processamento
         self.session_id = syn_ack.get('session_id')
         self.max_chars = syn_ack.get('max_chars', self.max_chars)
-        # [REQUISITO: Janela] Recebe o tamanho da janela definido pelo servidor.
+        # [REQUISITO: Janela] Recebe o tamanho da janela NEGOCIADO pelo servidor (mínimo entre cliente e servidor)
         self.window_size = syn_ack.get('window_size', self.window_size)
         server_protocol = syn_ack.get('protocol', self.protocol)
         if server_protocol != self.protocol: self.protocol = server_protocol
@@ -168,7 +178,14 @@ class Client:
         # [REQUISITO: Handshake] ACK final
         ack = {'session_id': self.session_id, 'message': 'Handshake completo'}
         sock.sendall((json.dumps(ack) + "\n").encode('utf-8'))
-        print(f"[CLIENTE] Handshake concluído. Protocolo: {self.protocol}, Janela: {self.window_size}\n")
+        print(f"[CLIENTE] SYN-ACK recebido do servidor")
+        print(f"[CLIENTE] Session ID: {self.session_id}")
+        print(f"[CLIENTE] Tamanho máximo de mensagem: {self.max_chars} caracteres")
+        print(f"[CLIENTE] Tamanho da janela negociado: {self.window_size}")
+        print(f"[CLIENTE] ACK enviado. Handshake concluído!")
+        print(f"\n{'='*60}")
+        print("Pronto para enviar mensagens!")
+        print(f"{'='*60}\n")
         
         while True:
             print(f"\n[INFO] Mensagens enviadas: {self.messages_sent} | Confirmações (ACKs): {self.packets_confirmed}")
@@ -250,11 +267,11 @@ class Client:
 
                 elif self.protocol == 'sr':
                     
-                    max_sr_loops = 10 
-                    sr_loop_count = 0
+                    # CORREÇÃO: Loop baseado em tempo máximo ao invés de contagem fixa
+                    max_sr_time = 30.0  # 30 segundos máximo para completar a mensagem
+                    sr_start_time = time.time()
                     
-                    while not mensagem_confirmada and sr_loop_count < max_sr_loops:
-                        sr_loop_count += 1
+                    while not mensagem_confirmada and (time.time() - sr_start_time) < max_sr_time:
                         packets_to_resend_now = False
 
                         # [REQUISITO: Temporizador] Reenviar pacotes expirados (SR)
@@ -314,7 +331,7 @@ class Client:
                     
                     if not mensagem_confirmada:
                         tentativas += 1 
-                        
+                        print(f"[CLIENTE] Timeout do SR (30s). Incrementando tentativas para {tentativas}.")
 
             if mensagem_confirmada:
                 self.messages_sent += 1
@@ -342,15 +359,21 @@ if __name__ == "__main__":
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=5005) 
     parser.add_argument("--max_chars", type=int, default=30)
-    parser.add_argument("--no-ssl", action='store_true')
+    parser.add_argument("--window_size", type=int, default=5, help="Tamanho da janela proposto (1-5)")
+    parser.add_argument("--ssl", action='store_true', help="Ativar SSL/TLS (requer certificados)")
     args = parser.parse_args()
 
+    # CORREÇÃO: Validação robusta da escolha do protocolo
     chosen_protocol = ""
     while chosen_protocol not in ['gbn', 'sr']:
         chosen_protocol = input("Digite o protocolo a ser utilizado (gbn ou sr): ").lower().strip()
         if chosen_protocol not in ['gbn', 'sr']:
-            print("Opção inválida. Digite 'gbn' ou 'sr'.")
+            print("⚠️  Opção inválida. Digite 'gbn' ou 'sr'.")
 
-    use_ssl = not args.no_ssl
-    client = Client(args.host, args.port, chosen_protocol, args.max_chars, use_ssl)
+    use_ssl = args.ssl  # SSL desabilitado por padrão, use --ssl para ativar
+    
+    # Garantir que window_size esteja entre 1 e 5
+    window_size = max(1, min(5, args.window_size))
+    
+    client = Client(args.host, args.port, chosen_protocol, args.max_chars, window_size, use_ssl)
     client.connect()

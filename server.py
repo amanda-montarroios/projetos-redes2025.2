@@ -21,13 +21,13 @@ def calcular_checksum(texto):
 # =================================================================
 
 class Server:
-    def __init__(self, host='127.0.0.1', port=5005, protocol='gbn', max_chars=30, max_payload=4, use_ssl=True):
+    def __init__(self, host='127.0.0.1', port=5005, protocol='gbn', max_chars=30, max_payload=4, window_size=5, use_ssl=False):
         self.host = host
         self.port = port
         self.protocol = protocol
         self.max_chars = min(max_chars, 30)  
         self.max_payload = max_payload       
-        self.window_size = 5
+        self.window_size = window_size  # Tamanho da janela padrão do servidor
         self.use_ssl = use_ssl
         self.client_sessions = {}
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -36,6 +36,11 @@ class Server:
 
     def handle_syn(self, client_socket, client_addr, data):
         session_id = hashlib.md5(f"{client_addr}{time.time()}".encode()).hexdigest()[:8]
+        
+        # [REQUISITO: Janela] Negociação do tamanho da janela - usa o MÍNIMO entre cliente e servidor
+        client_window_size = data.get('window_size', 5)
+        negotiated_window_size = min(self.window_size, client_window_size)
+        
         self.client_sessions[client_addr] = {
             'session_id': session_id,
             'handshake_complete': False,
@@ -43,25 +48,34 @@ class Server:
             'buffer_sr': {},            # Buffer para SR (fora de ordem)
             'packets_received': 0,
             'acks_sent': 0,
+            'messages_complete': 0,     # Contador de mensagens completas recebidas
             'start_time': time.time(),
             'protocol': data.get('protocol', self.protocol),
             'corrupted': False,         # Estado de corrupção da mensagem atual (GBN)
             'expected_seq_num': 0,      # Próxima sequência esperada (base da janela SR/GBN)
-            'total_packets_msg': 0      # Total de pacotes esperados para a mensagem
+            'total_packets_msg': 0,     # Total de pacotes esperados para a mensagem
+            'window_size': negotiated_window_size  # Janela negociada
         }
+        
         syn_ack = {
-            'status': 'ok', 'protocol': self.client_sessions[client_addr]['protocol'],
-            'max_chars': self.max_chars, 'max_payload': self.max_payload,
-            'window_size': self.window_size, 'session_id': session_id
+            'status': 'ok', 
+            'protocol': self.client_sessions[client_addr]['protocol'],
+            'max_chars': self.max_chars, 
+            'max_payload': self.max_payload,
+            'window_size': negotiated_window_size,  # Envia o valor negociado
+            'session_id': session_id
         }
         client_socket.sendall((json.dumps(syn_ack) + "\n").encode('utf-8'))
-        print(f"[SERVIDOR] SYN-ACK enviado para {client_addr} (Session: {session_id}, Protocolo: {self.client_sessions[client_addr]['protocol']})")
+        print(f"[SERVIDOR] SYN-ACK enviado para {client_addr}")
+        print(f"           Session: {session_id}")
+        print(f"           Protocolo: {self.client_sessions[client_addr]['protocol']}")
+        print(f"           Janela negociada: {negotiated_window_size} (Cliente: {client_window_size}, Servidor: {self.window_size})")
         return session_id
 
     def handle_ack(self, client_addr, data):
         if client_addr in self.client_sessions:
             self.client_sessions[client_addr]['handshake_complete'] = True
-            print(f"[SERVIDOR] Handshake concluído para {client_addr}")
+            print(f"[SERVIDOR] ✓ Handshake concluído para {client_addr}\n")
 
     def handle_data_message(self, client_socket, client_addr, message_data):
         session = self.client_sessions.get(client_addr)
@@ -73,6 +87,7 @@ class Server:
         data_encriptada_str = message_data.get('data', '')
         checksum_recebido = message_data.get('checksum')
         is_last_packet = message_data.get('is_last', False)
+        window_size = session['window_size']
         
         # Resetar o estado da mensagem no início de uma nova mensagem/retransmissão
         if sequence == session['expected_seq_num'] and protocol == 'sr' and not session['buffer_sr']:
@@ -100,8 +115,8 @@ class Server:
         data = data_desencriptada
 
         print(f"[SERVIDOR] Pacote #{sequence} ({protocol}) recebido de {client_addr}")
-        print(f"Conteúdo Desencriptado: '{data}' | Tamanho: {len(data)}")
-        print(f"Checksum enviado: {checksum_recebido} | Checksum calculado: {checksum_calculado}")
+        print(f"           Conteúdo Desencriptado: '{data}' | Tamanho: {len(data)}")
+        print(f"           Checksum enviado: {checksum_recebido[:16]}... | Checksum calculado: {checksum_calculado[:16]}...")
         
         # Validação de Checksum/Integridade e Tamanho de Carga Útil
         is_corrupt_packet = (checksum_recebido != checksum_calculado) or (len(data) > self.max_payload)
@@ -116,11 +131,11 @@ class Server:
                 nack = {'type':'ack','status':'error','sequence':sequence, 'message': nack_msg, 'timestamp':time.time()}
                 client_socket.sendall((json.dumps(nack) + "\n").encode('utf-8'))
                 session['acks_sent'] += 1
-                print(f"[SERVIDOR] Pacote #{sequence} INVÁLIDO! → NACK (SR) enviado.\n")
+                print(f"[SERVIDOR] ✗ Pacote #{sequence} INVÁLIDO! → NACK (SR) enviado.\n")
             elif protocol == 'gbn': 
                 # No GBN, qualquer erro no pacote esperado invalida o lote e o servidor não avança expected_seq_num
                 session['corrupted'] = True
-                print(f"[SERVIDOR] Pacote #{sequence} INVÁLIDO! (GBN) - Marcado para NACK final.")
+                print(f"[SERVIDOR] ✗ Pacote #{sequence} INVÁLIDO! (GBN) - Marcado para NACK final.\n")
 
             return False
             
@@ -132,16 +147,15 @@ class Server:
                     session['buffer'][sequence] = data
                     session['packets_received'] += 1
                     session['expected_seq_num'] += 1
-                    print(f"[SERVIDOR] Pacote #{sequence} íntegro (GBN) → Aceito em ordem.")
+                    print(f"[SERVIDOR] ✓ Pacote #{sequence} íntegro (GBN) → Aceito em ordem.\n")
                 else:
                     # Pacote fora de ordem (duplicado ou à frente) - Descartar silenciosamente
                     session['corrupted'] = True # Força NACK final, pois algo deu errado.
-                    print(f"[SERVIDOR] Pacote #{sequence} íntegro, mas FORA DE ORDEM (GBN) → Descartado e marcado para NACK final.")
+                    print(f"[SERVIDOR] ✗ Pacote #{sequence} íntegro, mas FORA DE ORDEM (GBN) → Descartado e marcado para NACK final.\n")
 
 
             elif protocol == 'sr':
                 # SR: Aceita pacotes dentro da janela
-                window_size = self.window_size 
                 base = session['expected_seq_num']
                 
                 if base <= sequence < base + window_size:
@@ -153,7 +167,7 @@ class Server:
                         ack = {'type': 'ack', 'status': 'ok', 'sequence': sequence, 'message': 'Pacote recebido com sucesso (SR)', 'timestamp': time.time()}
                         client_socket.sendall((json.dumps(ack) + "\n").encode('utf-8'))
                         session['acks_sent'] += 1
-                        print(f"[SERVIDOR] Pacote #{sequence} íntegro (SR) → ACK SELETIVO enviado.")
+                        print(f"[SERVIDOR] ✓ Pacote #{sequence} íntegro (SR) → ACK SELETIVO enviado.\n")
 
                     # Tenta avançar a base da janela (coletando pacotes bufferizados)
                     while session['expected_seq_num'] in session['buffer_sr']:
@@ -164,10 +178,10 @@ class Server:
                     ack = {'type': 'ack', 'status': 'ok', 'sequence': sequence, 'message': 'ACK duplicado enviado (SR)', 'timestamp': time.time()}
                     client_socket.sendall((json.dumps(ack) + "\n").encode('utf-8'))
                     session['acks_sent'] += 1
-                    print(f"[SERVIDOR] Pacote #{sequence} DUPLICADO (SR) → ACK reenviado.")
+                    print(f"[SERVIDOR] ✓ Pacote #{sequence} DUPLICADO (SR) → ACK reenviado.\n")
                 else:
                     # Pacote muito à frente da janela (descartado)
-                    print(f"[SERVIDOR] Pacote #{sequence} muito à frente da janela SR (base: {base}, janela: {window_size}) - Descartado.")
+                    print(f"[SERVIDOR] ✗ Pacote #{sequence} muito à frente da janela SR (base: {base}, janela: {window_size}) - Descartado.\n")
                     return False
 
 
@@ -179,13 +193,22 @@ class Server:
             # Montar a mensagem completa a partir do buffer SR
             full_message = ''.join(session['buffer_sr'][i] for i in sorted(session['buffer_sr']))
             
-            print(f"\n{'='*30} MENSAGEM COMPLETA RECEBIDA (SR) {'='*30}")
-            print(f"Mensagem: {full_message}")
-            print(f"[SERVIDOR] Mensagem completa re-montada (SR). Confirmações já enviadas por pacote.")
+            print(f"\n{'='*70}")
+            print(f"{'MENSAGEM COMPLETA RECEBIDA (SR)':^70}")
+            print(f"{'='*70}")
+            print(f"De: {client_addr}")
+            print(f"Protocolo: SR (Selective Repeat)")
+            print(f"Total de pacotes: {session['total_packets_msg']}")
+            print(f"{'-'*70}")
+            print(f"CONTEÚDO DA MENSAGEM:")
+            print(f"{full_message}")
+            print(f"{'-'*70}")
+            print(f"Tamanho: {len(full_message)} caracteres")
+            print(f"{'='*70}\n")
             
+            session['messages_complete'] += 1
             session['buffer_sr'].clear()
             session['total_packets_msg'] = 0
-            print(f"{'='*80}\n")
             
         # Condição de término GBN: O último pacote da rajada foi processado (e aceito em ordem)
         elif is_last_packet and protocol == 'gbn':
@@ -193,21 +216,30 @@ class Server:
             full_message = ''.join(session['buffer'][i] for i in sorted(session['buffer']))
             is_message_corrupted = session.pop('corrupted', False)
 
-            print(f"\n{'='*30} MENSAGEM COMPLETA RECEBIDA (GBN) {'='*30}")
-            print(f"Mensagem: {full_message}")
-
-            # ************************************************
-            # CORREÇÃO APLICADA AQUI: Removida a checagem 'len(full_message) < self.max_chars' 
-            # para aceitar mensagens curtas no GBN.
-            # ************************************************
+            print(f"\n{'='*70}")
+            print(f"{'MENSAGEM COMPLETA RECEBIDA (GBN)':^70}")
+            print(f"{'='*70}")
+            print(f"De: {client_addr}")
+            print(f"Protocolo: GBN (Go-Back-N)")
+            print(f"Total de pacotes: {session['total_packets_msg']}")
+            print(f"{'-'*70}")
+            
             if is_message_corrupted:
                 status = 'error'
                 msg = 'Mensagem rejeitada (GBN): Falha de integridade/criptografia ou Pacote Fora de Ordem.'
-                print(f"[SERVIDOR] Mensagem completa rejeitada (GBN). NACK final enviado.")
+                print(f"STATUS: ✗ REJEITADA")
+                print(f"MOTIVO: {msg}")
+                print(f"{'='*70}\n")
             else:
                 status = 'ok'
                 msg = 'Mensagem recebida com sucesso (GBN)'
-                print(f"[SERVIDOR] Mensagem completa aceita (GBN). ACK final enviado.")
+                print(f"STATUS: ✓ ACEITA")
+                print(f"CONTEÚDO DA MENSAGEM:")
+                print(f"{full_message}")
+                print(f"{'-'*70}")
+                print(f"Tamanho: {len(full_message)} caracteres")
+                print(f"{'='*70}\n")
+                session['messages_complete'] += 1
             
             final_ack = {'type':'ack','status':status,'sequence':sequence, 'message': msg, 'echo': full_message, 'timestamp':time.time()}
             client_socket.sendall((json.dumps(final_ack) + "\n").encode('utf-8'))
@@ -215,7 +247,6 @@ class Server:
 
             session['buffer'].clear()
             session['total_packets_msg'] = 0
-            print(f"{'='*80}\n")
 
         return True
 
@@ -224,18 +255,28 @@ class Server:
         if client_addr in self.client_sessions:
             session = self.client_sessions.pop(client_addr)
             duration = time.time() - session['start_time']
-            print(f"\n--- Estatísticas da Sessão {session['session_id']} ---")
+            
+            print(f"\n{'='*60}")
+            print(f"ESTATÍSTICAS DA SESSÃO {session['session_id']}")
+            print(f"{'='*60}")
+            print(f"Cliente: {client_addr}")
             print(f"Protocolo: {session['protocol']}")
-            print(f"Pacotes Recebidos: {session['packets_received']}")
-            print(f"ACKs/NACKs Enviados: {session['acks_sent']}")
-            print(f"Duração: {duration:.2f} segundos")
-            print("-" * 40)
+            print(f"Tamanho da janela: {session['window_size']}")
+            print(f"{'-'*60}")
+            print(f"Mensagens completas recebidas: {session['messages_complete']}")
+            print(f"Pacotes individuais recebidos: {session['packets_received']}")
+            print(f"ACKs/NACKs enviados: {session['acks_sent']}")
+            print(f"Duração da conexão: {duration:.2f} segundos")
+            print(f"{'='*60}\n")
 
     def client_thread(self, client_socket, addr):
         client_addr = f"{addr[0]}:{addr[1]}"
         buffer = ''
         try:
-            print(f"[SERVIDOR] Aguardando pacotes de {client_addr}...\n")
+            print(f"\n{'='*60}")
+            print(f"[SERVIDOR] Nova conexão de {client_addr}")
+            print(f"{'='*60}\n")
+            
             while True:
                 data = client_socket.recv(2048)
                 if not data:
@@ -252,12 +293,15 @@ class Server:
                         print(f"[SERVIDOR] Erro ao decodificar JSON de {client_addr}: {e}")
                         continue
 
-                    if 'protocol' in message_data and 'type' not in message_data: self.handle_syn(client_socket, client_addr, message_data)
-                    elif 'session_id' in message_data and 'message' in message_data and message_data['message'] == 'Handshake completo': self.handle_ack(client_addr, message_data)
-                    elif message_data.get('type') == 'data': self.handle_data_message(client_socket, client_addr, message_data)
+                    if 'protocol' in message_data and 'type' not in message_data: 
+                        self.handle_syn(client_socket, client_addr, message_data)
+                    elif 'session_id' in message_data and 'message' in message_data and message_data['message'] == 'Handshake completo': 
+                        self.handle_ack(client_addr, message_data)
+                    elif message_data.get('type') == 'data': 
+                        self.handle_data_message(client_socket, client_addr, message_data)
                     elif message_data.get('type') == 'close':
                         self.handle_close(client_addr, message_data)
-                        print(f"[SERVIDOR] Close recebido de {client_addr} — conexão encerrada.")
+                        print(f"[SERVIDOR] Close recebido de {client_addr} — conexão encerrada.\n")
                         return # Encerra a thread
                     else:
                         print(f"[SERVIDOR] Tipo de mensagem desconhecido: {message_data.get('type')}")
@@ -286,11 +330,15 @@ class Server:
                 self.sock = context.wrap_socket(self.sock, server_side=True)
                 print("[SERVIDOR] SSL/TLS ativado (Criptografia de Transporte)")
             except FileNotFoundError:
-                print("[SERVIDOR] ERRO: Arquivos 'server.crt' ou 'server.key' não encontrados. SSL desativado.")
-                self.use_ssl = False
+                print("[SERVIDOR] ERRO: Arquivos 'server.crt' ou 'server.key' não encontrados.")
+                print("[SERVIDOR] SSL não pôde ser ativado. Execute sem --ssl ou crie os certificados.")
+                self.sock.close()
+                return
 
+        print(f"{'='*60}")
         print(f"[SERVIDOR] Escutando em {self.host}:{self.port}")
         print(f"[SERVIDOR] Protocolo padrão: {self.protocol}")
+        print(f"[SERVIDOR] Tamanho da janela (máximo): {self.window_size}")
         print(f"[SERVIDOR] Limite: {self.max_chars} chars (msg) / {self.max_payload} chars (pacote)")
         print(f"[SERVIDOR] Checksum: SHA-1 | Criptografia: Fernet (AES-128)")
         print(f"{'='*60}\n")
@@ -300,7 +348,6 @@ class Server:
                 client_socket, addr = self.sock.accept()
                 thread = threading.Thread(target=self.client_thread, args=(client_socket, addr))
                 thread.start()
-                print(f"[SERVIDOR] Cliente {addr} atendido em uma nova thread.")
             except KeyboardInterrupt:
                 print("\n[SERVIDOR] Servidor finalizado pelo usuário")
                 break
@@ -318,9 +365,14 @@ if __name__ == "__main__":
     parser.add_argument("--protocol", choices=['gbn','sr'], default='gbn')
     parser.add_argument("--max_chars", type=int, default=30)
     parser.add_argument("--max_payload", type=int, default=4)
-    parser.add_argument("--no-ssl", action='store_true')
+    parser.add_argument("--window_size", type=int, default=5, help="Tamanho máximo da janela (1-5)")
+    parser.add_argument("--ssl", action='store_true', help="Ativar SSL/TLS (requer certificados server.crt e server.key)")
     args = parser.parse_args()
 
-    use_ssl = not args.no_ssl
-    server = Server(args.host, args.port, args.protocol, args.max_chars, args.max_payload, use_ssl)
+    use_ssl = args.ssl  # SSL desabilitado por padrão, use --ssl para ativar
+    
+    # Garantir que window_size esteja entre 1 e 5
+    window_size = max(1, min(5, args.window_size))
+    
+    server = Server(args.host, args.port, args.protocol, args.max_chars, args.max_payload, window_size, use_ssl)
     server.start()

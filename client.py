@@ -21,12 +21,12 @@ def calcular_checksum(texto):
 
 class Client:
     # [REQUISITO: Segmentação] Define o tamanho máximo de carga útil do pacote.
-    PACKET_PAYLOAD_SIZE = 4
+    # PACKET_PAYLOAD_SIZE removido em favor de self.packet_size
     MAX_RETRIES = 3
     # [REQUISITO: Temporizador] Timeout para pacotes SR (2 segundos)
     SR_TIMEOUT = 2.0  
 
-    def __init__(self, server_addr='127.0.0.1', server_port=5005, protocol='gbn', max_chars=30, window_size=5, use_ssl=False):
+    def __init__(self, server_addr='127.0.0.1', server_port=5005, protocol='gbn', max_chars=30, window_size=5, use_ssl=False, packet_size=4):
         self.server_addr = server_addr
         self.server_port = server_port
         self.protocol = protocol
@@ -39,6 +39,7 @@ class Client:
         self.packets_confirmed = 0
         # [REQUISITO: Janela] Tamanho da janela de envio (para GBN e SR) - será negociado
         self.window_size = window_size
+        self.packet_size = packet_size
         self.use_ssl = use_ssl
         # [REQUISITO: Simulação de erro/perda] Variáveis para injeção de falha.
         self.corrupt_packet_index = -1
@@ -158,11 +159,12 @@ class Client:
         # [REQUISITO: Handshake] SYN - Cliente NÃO propõe janela, servidor decide
         syn = {
             'protocol': self.protocol, 
-            'max_chars': self.max_chars
+            'max_chars': self.max_chars,
+            'packet_size': self.packet_size
             # window_size REMOVIDO - servidor decide sozinho
         }
         sock.sendall((json.dumps(syn) + "\n").encode('utf-8'))
-        print(f"[CLIENTE] SYN enviado: protocolo={self.protocol}, max_chars={self.max_chars}")
+        print(f"[CLIENTE] SYN enviado: protocolo={self.protocol}, max_chars={self.max_chars}, packet_size={self.packet_size}")
         
         data = sock.recv(1024)
         syn_ack = json.loads(data.decode('utf-8'))
@@ -225,7 +227,7 @@ class Client:
 
             print(f"[DEBUG] Mensagem FINAL antes da segmentação ({len(mensagem)} chars): '{mensagem}'")
             # [REQUISITO: Segmentação] Divisão da mensagem em chunks (pacotes).
-            chunks = [mensagem[i:i+self.PACKET_PAYLOAD_SIZE] for i in range(0, len(mensagem), self.PACKET_PAYLOAD_SIZE)]
+            chunks = [mensagem[i:i+self.packet_size] for i in range(0, len(mensagem), self.packet_size)]
             total_packets = len(chunks)
             
             # Inicialização para a mensagem atual (SR/GBN)
@@ -370,10 +372,24 @@ if __name__ == "__main__":
         if chosen_protocol not in ['gbn', 'sr']:
             print("⚠️  Opção inválida. Digite 'gbn' ou 'sr'.")
 
+    # Escolha do tamanho do pacote
+    chosen_packet_size = 4
+    while True:
+        try:
+            w_input = input("Qual o tamanho do pacote (4 a 8)? ").strip()
+            val = int(w_input)
+            if 4 <= val <= 8:
+                chosen_packet_size = val
+                break
+            else:
+                print("Tamanho inválido. Escolha um valor entre 4 e 8.")
+        except ValueError:
+            print("Entrada inválida. Digite um número inteiro.")
+
     use_ssl = args.ssl  # SSL desabilitado por padrão, use --ssl para ativar
     
     # Garantir que window_size esteja entre 1 e 5
     window_size = max(1, min(5, args.window_size))
     
-    client = Client(args.host, args.port, chosen_protocol, args.max_chars, window_size, use_ssl)
+    client = Client(args.host, args.port, chosen_protocol, args.max_chars, window_size, use_ssl, packet_size=chosen_packet_size)
     client.connect()

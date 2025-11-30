@@ -40,6 +40,13 @@ class Server:
         # [REQUISITO: Janela] Negociação do tamanho da janela - usa o MÍNIMO entre cliente e servidor
         client_window_size = data.get('window_size', 5)
         negotiated_window_size = min(self.window_size, client_window_size)
+
+        # Negociação do tamanho do pacote (payload)
+        client_packet_size = data.get('packet_size')
+        if client_packet_size and isinstance(client_packet_size, int):
+            negotiated_payload = client_packet_size
+        else:
+            negotiated_payload = self.max_payload
         
         self.client_sessions[client_addr] = {
             'session_id': session_id,
@@ -54,14 +61,15 @@ class Server:
             'corrupted': False,         # Estado de corrupção da mensagem atual (GBN)
             'expected_seq_num': 0,      # Próxima sequência esperada (base da janela SR/GBN)
             'total_packets_msg': 0,     # Total de pacotes esperados para a mensagem
-            'window_size': negotiated_window_size  # Janela negociada
+            'window_size': negotiated_window_size,  # Janela negociada
+            'max_payload': negotiated_payload
         }
         
         syn_ack = {
             'status': 'ok', 
             'protocol': self.client_sessions[client_addr]['protocol'],
             'max_chars': self.max_chars, 
-            'max_payload': self.max_payload,
+            'max_payload': negotiated_payload,
             'window_size': negotiated_window_size,  # Envia o valor negociado
             'session_id': session_id
         }
@@ -70,6 +78,7 @@ class Server:
         print(f"           Session: {session_id}")
         print(f"           Protocolo: {self.client_sessions[client_addr]['protocol']}")
         print(f"           Janela negociada: {negotiated_window_size} (Cliente: {client_window_size}, Servidor: {self.window_size})")
+        print(f"           Payload negociado: {negotiated_payload}")
         return session_id
 
     def handle_ack(self, client_addr, data):
@@ -119,7 +128,8 @@ class Server:
         print(f"           Checksum enviado: {checksum_recebido[:16]}... | Checksum calculado: {checksum_calculado[:16]}...")
         
         # Validação de Checksum/Integridade e Tamanho de Carga Útil
-        is_corrupt_packet = (checksum_recebido != checksum_calculado) or (len(data) > self.max_payload)
+        max_payload = session.get('max_payload', self.max_payload)
+        is_corrupt_packet = (checksum_recebido != checksum_calculado) or (len(data) > max_payload)
 
         # 3. Processamento de Pacote
         

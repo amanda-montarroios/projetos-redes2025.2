@@ -388,6 +388,8 @@ python client.py --window_size 4
 | **Maria Júlia Dantas** | mjdma@cesar.school |
 | **Maria Luiza Dantas** | mldt@cesar.school |
 | **Rafael Barros** | ralb@cesar.school |
+| **Julia Maria Teixeira** | jmst@cesar.school |
+
 
 ---
 
